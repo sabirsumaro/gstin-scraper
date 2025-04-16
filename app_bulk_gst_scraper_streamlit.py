@@ -3,6 +3,10 @@ import streamlit as st
 import pandas as pd
 import time
 from io import BytesIO
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -11,16 +15,17 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-st.set_page_config(page_title="Parallel GSTIN Scraper", layout="centered")
-st.title("⚡ Superfast GSTIN Scraper – 3x Speed with Parallel Chrome")
+st.set_page_config(page_title="GSTIN Scraper + Email", layout="centered")
+st.title("📤 Bulk GSTIN Scraper + Email Report")
 
-# === Rerun prevention ===
-if "has_run" not in st.session_state:
-    st.session_state.has_run = False
+# Email fields
+st.subheader("✉️ Email Configuration")
+sender_email = st.text_input("Sender Gmail Address")
+app_password = st.text_input("App Password", type="password")
+receiver_email = st.text_input("Receiver Email Address")
 
-uploaded_file = st.file_uploader("📤 Upload Excel file with GSTIN list", type=["xlsx"])
+uploaded_file = st.file_uploader("📁 Upload Excel file with GSTIN list", type=["xlsx"])
 
-# Setup Chrome driver
 def setup_driver():
     options = Options()
     options.add_argument("--headless")
@@ -29,7 +34,6 @@ def setup_driver():
     options.add_argument("--disable-notifications")
     return webdriver.Chrome(service=Service(), options=options)
 
-# Extract function per GSTIN
 def extract_data(gstin):
     driver = setup_driver()
     row = {
@@ -73,13 +77,32 @@ def extract_data(gstin):
         driver.quit()
     return row
 
-if uploaded_file and not st.session_state.has_run:
-    st.session_state.has_run = True
+def send_email(sender, password, receiver, file_bytes, filename):
+    msg = MIMEMultipart()
+    msg['From'] = sender
+    msg['To'] = receiver
+    msg['Subject'] = 'GSTIN Extraction Report'
 
+    part = MIMEBase('application', "octet-stream")
+    part.set_payload(file_bytes.read())
+    encoders.encode_base64(part)
+    part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+    msg.attach(part)
+
+    try:
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(sender, password)
+        server.sendmail(sender, receiver, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        st.error(f"Email failed: {str(e)}")
+        return False
+
+if uploaded_file and sender_email and app_password and receiver_email:
     df = pd.read_excel(uploaded_file)
     gstin_list = df.iloc[:, 0].dropna().astype(str).tolist()
-    total = len(gstin_list)
-    st.info(f"⏳ Processing {total} GSTINs using 3 Chrome instances...")
+    st.info(f"⏳ Processing {len(gstin_list)} GSTINs using 3 Chrome instances...")
 
     results = []
     progress = st.progress(0)
@@ -87,20 +110,15 @@ if uploaded_file and not st.session_state.has_run:
     with ThreadPoolExecutor(max_workers=3) as executor:
         for i, result in enumerate(executor.map(extract_data, gstin_list)):
             results.append(result)
-            progress.progress((i + 1) / total)
+            progress.progress((i + 1) / len(gstin_list))
 
     output_df = pd.DataFrame(results)
     st.success("✅ Extraction Complete!")
 
-    # Download Excel file
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         output_df.to_excel(writer, index=False)
     buffer.seek(0)
 
-    st.download_button(
-        label="📥 Download Extracted Excel",
-        data=buffer,
-        file_name="Parallel_GSTIN_Data.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    if send_email(sender_email, app_password, receiver_email, buffer, "GSTIN_Report.xlsx"):
+        st.success("📤 Email sent successfully with report attached!")
